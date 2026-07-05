@@ -47,17 +47,15 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: resolve
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: linux-x86_64
-            goos: linux
-            goarch: amd64
-          - target: linux-arm64
-            goos: linux
-            goarch: arm64
+          - asset: linux-x86_64
+            runner: ubuntu-24.04
+          - asset: linux-arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Install system dependencies
         shell: bash
@@ -71,7 +69,7 @@ jobs:
             tar \
             gzip
       - name: Install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: stable
       - name: Clone SourceHut repository
@@ -127,7 +125,7 @@ jobs:
           tar -czf "${pkg}.tar.gz" "$pkg"
           sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hut-${{ needs.resolve.outputs.tag }}-${{ matrix.target }}
           path: |
@@ -142,7 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
