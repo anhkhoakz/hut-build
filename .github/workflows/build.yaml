@@ -1,0 +1,165 @@
+name: Build SourceHut release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "SourceHut tag to build. Leave empty to use latest tag."
+        required: false
+        type: string
+  schedule:
+    - cron: "0 0 * * *"
+permissions:
+  contents: write
+env:
+  SRHT_OWNER: xenrox
+  SRHT_REPO: hut
+jobs:
+  resolve:
+    name: Resolve SourceHut tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve latest tag
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ inputs.tag }}" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="$(
+              git ls-remote --tags --refs "https://git.sr.ht/~${SRHT_OWNER}/${SRHT_REPO}" |
+                awk -F/ '{print $NF}' |
+                sort -V |
+                tail -n 1
+            )"
+          fi
+
+          [ -n "$tag" ] || {
+            echo "No tag found" >&2
+            exit 1
+          }
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          printf 'Resolved tag: %s\n' "$tag"
+  build:
+    name: Build ${{ matrix.target }}
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            goos: linux
+            goarch: amd64
+          - target: linux-arm64
+            goos: linux
+            goarch: arm64
+    steps:
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            scdoc \
+            tar \
+            gzip
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Clone SourceHut repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone \
+            --depth 1 \
+            --branch "${{ needs.resolve.outputs.tag }}" \
+            "https://git.sr.ht/~${SRHT_OWNER}/${SRHT_REPO}" \
+            src
+      - name: Build
+        shell: bash
+        working-directory: src
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+
+          make
+      - name: Package
+        shell: bash
+        working-directory: src
+        run: |
+          set -euo pipefail
+
+          tag="${{ needs.resolve.outputs.tag }}"
+          target="${{ matrix.target }}"
+          pkg="hut-${tag}-${target}"
+
+          mkdir -p "../dist/${pkg}/bin"
+
+          if [ -x ./hut ]; then
+            cp ./hut "../dist/${pkg}/bin/hut"
+          else
+            found="$(
+              find . -type f -name hut -perm -111 |
+                head -n 1
+            )"
+
+            [ -n "$found" ] || {
+              echo "Cannot find built hut binary" >&2
+              exit 1
+            }
+
+            cp "$found" "../dist/${pkg}/bin/hut"
+          fi
+
+          cd ../dist
+          tar -czf "${pkg}.tar.gz" "$pkg"
+          sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hut-${{ needs.resolve.outputs.tag }}-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+  release:
+    name: Publish GitHub release
+    needs:
+      - resolve
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          ls -lah dist
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "hut ${TAG}" \
+              --notes "Automated build from SourceHut tag ${TAG}."
+          fi
